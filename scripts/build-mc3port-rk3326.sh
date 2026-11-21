@@ -150,6 +150,9 @@ using WORD = uint16_t;
 using BYTE = uint8_t;
 using BOOL = int;
 using HANDLE = void*;
+using HWND = void*;
+using HINSTANCE = void*;
+using LPARAM = intptr_t;
 using LPCSTR = const char*;
 using LPSTR = char*;
 using LPVOID = void*;
@@ -329,6 +332,61 @@ inline NTSTATUS BCryptDestroyHash(BCRYPT_HASH_HANDLE) {
 #endif
 EOF
 
+cat > "${SHIM_DIR}/commdlg.h" <<'EOF'
+#pragma once
+#ifndef _WIN32
+#include <cstdint>
+#include <cstring>
+#include "rk3326_posix_win32_compat.h"
+
+using LPOFNHOOKPROC = uintptr_t;
+
+struct OPENFILENAMEA {
+  DWORD lStructSize = 0;
+  HWND hwndOwner = nullptr;
+  HINSTANCE hInstance = nullptr;
+  LPCSTR lpstrFilter = nullptr;
+  LPSTR lpstrCustomFilter = nullptr;
+  DWORD nMaxCustFilter = 0;
+  DWORD nFilterIndex = 0;
+  LPSTR lpstrFile = nullptr;
+  DWORD nMaxFile = 0;
+  LPSTR lpstrFileTitle = nullptr;
+  DWORD nMaxFileTitle = 0;
+  LPCSTR lpstrInitialDir = nullptr;
+  LPCSTR lpstrTitle = nullptr;
+  DWORD Flags = 0;
+  WORD nFileOffset = 0;
+  WORD nFileExtension = 0;
+  LPCSTR lpstrDefExt = nullptr;
+  LPARAM lCustData = 0;
+  LPOFNHOOKPROC lpfnHook = 0;
+  LPCSTR lpTemplateName = nullptr;
+  void* pvReserved = nullptr;
+  DWORD dwReserved = 0;
+  DWORD FlagsEx = 0;
+};
+
+#ifndef OFN_FILEMUSTEXIST
+#define OFN_FILEMUSTEXIST 0x00001000u
+#endif
+#ifndef OFN_PATHMUSTEXIST
+#define OFN_PATHMUSTEXIST 0x00000800u
+#endif
+#ifndef OFN_NOCHANGEDIR
+#define OFN_NOCHANGEDIR 0x00000008u
+#endif
+
+inline BOOL GetOpenFileNameA(OPENFILENAMEA* lpofn) {
+  if (!lpofn || !lpofn->lpstrFile || lpofn->nMaxFile == 0) return FALSE;
+  if (lpofn->lpstrFile[0] != '\0') {
+    return TRUE;
+  }
+  return FALSE;
+}
+#endif
+EOF
+
 echo "== Generate RK3326 Toolchain =="
 mkdir -p "${WORKSPACE_DIR}/cmake"
 if [ ! -f "${WORKSPACE_DIR}/cmake/aarch64-arkos.cmake" ]; then
@@ -440,8 +498,11 @@ if "rk3326_posix_win32_compat.h" not in txt and "#include <windows.h>" in txt:
 bcrypt_guard = "#ifdef _WIN32\n#include <bcrypt.h>\n#else\n#include \"bcrypt.h\"\n#endif"
 if "#include <bcrypt.h>" in txt and "#ifdef _WIN32\n#include <bcrypt.h>" not in txt:
     txt = txt.replace("#include <bcrypt.h>", bcrypt_guard, 1)
+commdlg_guard = "#ifdef _WIN32\n#include <commdlg.h>\n#else\n#include \"commdlg.h\"\n#endif"
+if "#include <commdlg.h>" in txt and "#ifdef _WIN32\n#include <commdlg.h>" not in txt:
+    txt = txt.replace("#include <commdlg.h>", commdlg_guard, 1)
 p.write_text(txt, encoding="utf-8")
-print("src/pc/game_disc.cpp: windows.h und bcrypt.h fuer RK3326 abgesichert.")
+print("src/pc/game_disc.cpp: windows.h, bcrypt.h und commdlg.h fuer RK3326 abgesichert.")
 ' | tee -a patch.log
 fi
 
