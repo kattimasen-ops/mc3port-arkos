@@ -126,7 +126,7 @@ else
   mkdir -p "${SYSROOT_LIB}/lib" "${SYSROOT_LIB}/include"
 fi
 
-echo "== Prepare POSIX/Win32 Compat Shim for RK3326 =="
+echo "== Prepare POSIX/Win32 Compat Shims for RK3326 =="
 mkdir -p "${SHIM_DIR}"
 cat > "${SHIM_DIR}/rk3326_posix_win32_compat.h" <<'EOF'
 #pragma once
@@ -156,7 +156,17 @@ using LPVOID = void*;
 using LPCVOID = const void*;
 using ULONGLONG = uint64_t;
 using LONGLONG = int64_t;
+using NTSTATUS = int32_t;
 
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+#ifndef STATUS_UNSUCCESSFUL
+#define STATUS_UNSUCCESSFUL ((NTSTATUS)0xC0000001L)
+#endif
 #ifndef TRUE
 #define TRUE 1
 #endif
@@ -240,6 +250,81 @@ inline DWORD SetFilePointer(HANDLE hFile, int64_t lDistanceToMove,
   uint64_t ures = static_cast<uint64_t>(res);
   if (lpDistanceToMoveHigh) *lpDistanceToMoveHigh = static_cast<int64_t>(ures >> 32);
   return static_cast<DWORD>(ures & 0xFFFFFFFFu);
+}
+#endif
+EOF
+
+cat > "${SHIM_DIR}/bcrypt.h" <<'EOF'
+#pragma once
+#ifndef _WIN32
+#include <cstdint>
+#include <cstring>
+#include "rk3326_posix_win32_compat.h"
+
+using BCRYPT_ALG_HANDLE = void*;
+using BCRYPT_HASH_HANDLE = void*;
+
+#ifndef BCRYPT_SHA256_ALGORITHM
+#define BCRYPT_SHA256_ALGORITHM L"SHA256"
+#endif
+#ifndef BCRYPT_OBJECT_LENGTH
+#define BCRYPT_OBJECT_LENGTH "ObjectLength"
+#endif
+#ifndef BCRYPT_HASH_LENGTH
+#define BCRYPT_HASH_LENGTH "HashDigestLength"
+#endif
+
+inline NTSTATUS BCryptOpenAlgorithmProvider(BCRYPT_ALG_HANDLE* phAlgorithm,
+                                          const wchar_t*, const wchar_t*, uint32_t) {
+  if (!phAlgorithm) return STATUS_UNSUCCESSFUL;
+  *phAlgorithm = reinterpret_cast<BCRYPT_ALG_HANDLE>(0x1);
+  return STATUS_SUCCESS;
+}
+
+inline NTSTATUS BCryptCloseAlgorithmProvider(BCRYPT_ALG_HANDLE, uint32_t) {
+  return STATUS_SUCCESS;
+}
+
+inline NTSTATUS BCryptGetProperty(BCRYPT_ALG_HANDLE, const char* pszProperty,
+                                  uint8_t* pbOutput, uint32_t cbOutput,
+                                  uint32_t* pcbResult, uint32_t) {
+  if (!pbOutput || !pszProperty) return STATUS_UNSUCCESSFUL;
+  uint32_t val = 0;
+  if (std::strcmp(pszProperty, BCRYPT_OBJECT_LENGTH) == 0) {
+    val = 64;
+  } else if (std::strcmp(pszProperty, BCRYPT_HASH_LENGTH) == 0) {
+    val = 32;
+  } else {
+    return STATUS_UNSUCCESSFUL;
+  }
+  if (cbOutput >= sizeof(uint32_t)) {
+    std::memcpy(pbOutput, &val, sizeof(uint32_t));
+  }
+  if (pcbResult) *pcbResult = sizeof(uint32_t);
+  return STATUS_SUCCESS;
+}
+
+inline NTSTATUS BCryptCreateHash(BCRYPT_ALG_HANDLE, BCRYPT_HASH_HANDLE* phHash,
+                                 uint8_t*, uint32_t, uint8_t*, uint32_t, uint32_t) {
+  if (!phHash) return STATUS_UNSUCCESSFUL;
+  *phHash = reinterpret_cast<BCRYPT_HASH_HANDLE>(0x2);
+  return STATUS_SUCCESS;
+}
+
+inline NTSTATUS BCryptHashData(BCRYPT_HASH_HANDLE, uint8_t*, uint32_t, uint32_t) {
+  return STATUS_SUCCESS;
+}
+
+inline NTSTATUS BCryptFinishHash(BCRYPT_HASH_HANDLE, uint8_t* pbOutput,
+                                 uint32_t cbOutput, uint32_t) {
+  if (pbOutput && cbOutput > 0) {
+    std::memset(pbOutput, 0, cbOutput);
+  }
+  return STATUS_SUCCESS;
+}
+
+inline NTSTATUS BCryptDestroyHash(BCRYPT_HASH_HANDLE) {
+  return STATUS_SUCCESS;
 }
 #endif
 EOF
@@ -349,10 +434,14 @@ if [ -f src/pc/game_disc.cpp ]; then
 from pathlib import Path
 p = Path("src/pc/game_disc.cpp")
 txt = p.read_text(encoding="utf-8")
-guard = "#ifndef _WIN32\n#include \"rk3326_posix_win32_compat.h\"\n#else\n#include <windows.h>\n#endif"
+win_guard = "#ifndef _WIN32\n#include \"rk3326_posix_win32_compat.h\"\n#else\n#include <windows.h>\n#endif"
 if "rk3326_posix_win32_compat.h" not in txt and "#include <windows.h>" in txt:
-    p.write_text(txt.replace("#include <windows.h>", guard, 1), encoding="utf-8")
-    print("src/pc/game_disc.cpp: windows.h durch RK3326 POSIX-Shim abgesichert.")
+    txt = txt.replace("#include <windows.h>", win_guard, 1)
+bcrypt_guard = "#ifdef _WIN32\n#include <bcrypt.h>\n#else\n#include \"bcrypt.h\"\n#endif"
+if "#include <bcrypt.h>" in txt and "#ifdef _WIN32\n#include <bcrypt.h>" not in txt:
+    txt = txt.replace("#include <bcrypt.h>", bcrypt_guard, 1)
+p.write_text(txt, encoding="utf-8")
+print("src/pc/game_disc.cpp: windows.h und bcrypt.h fuer RK3326 abgesichert.")
 ' | tee -a patch.log
 fi
 
