@@ -179,18 +179,18 @@ jobs:
           txt = cm.read_text(encoding="utf-8")
           marker = "# RK3326 / Linux aarch64 port target"
           if marker not in txt:
-              addition = f"""
-          {marker}
-          if(NOT WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-              if(TARGET xportcore)
-                  add_executable(mc3port_rk3326 src/pc/game_disc.cpp)
-                  target_link_libraries(mc3port_rk3326 PRIVATE xportcore)
-                  target_include_directories(mc3port_rk3326 PRIVATE src ${{XPORT_DIR}}/src)
-                  target_compile_definitions(mc3port_rk3326 PRIVATE MC3PORT_VERSION="${{PROJECT_VERSION}}" RK3326_PORT=1)
-                  xport_identity(mc3port_rk3326 mc3port MC3PORT MC3_)
-              endif()
-          endif()
-          """
+              addition = (
+                  "\n" + marker + "\n"
+                  "if(NOT WIN32 AND CMAKE_SYSTEM_PROCESSOR MATCHES \"^(aarch64|arm64)$\")\n"
+                  "    if(TARGET xportcore)\n"
+                  "        add_executable(mc3port_rk3326 src/pc/game_disc.cpp)\n"
+                  "        target_link_libraries(mc3port_rk3326 PRIVATE xportcore)\n"
+                  "        target_include_directories(mc3port_rk3326 PRIVATE src ${XPORT_DIR}/src)\n"
+                  "        target_compile_definitions(mc3port_rk3326 PRIVATE MC3PORT_VERSION=\"${PROJECT_VERSION}\" RK3326_PORT=1)\n"
+                  "        xport_identity(mc3port_rk3326 mc3port MC3PORT MC3_)\n"
+                  "    endif()\n"
+                  "endif()\n"
+              )
               cm.write_text(txt + addition, encoding="utf-8")
               print("CMakeLists.txt um RK3326/aarch64-Target erweitert.")
           PY
