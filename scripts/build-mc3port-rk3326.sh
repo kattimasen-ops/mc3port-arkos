@@ -13,7 +13,26 @@ echo "== Git & Submodule Init =="
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
 git --version
-git submodule update --init --recursive
+git config --global --add safe.directory '*'
+
+if [ ! -e .git ]; then
+  echo "Kein .git-Verzeichnis gefunden (REST-API-Checkout). Initialisiere Git fuer Submodule..."
+  git init -q
+  git config user.name "CI Builder"
+  git config user.email "ci@localhost"
+  git add -A
+  git commit -q -m "Workspace snapshot" || true
+fi
+
+if [ -f .gitmodules ]; then
+  git submodule sync --recursive || true
+  git submodule update --init --recursive
+else
+  echo "Keine .gitmodules gefunden; pruefe external/xport direkt..."
+  if [ -d external/xport ] && [ -z "$(ls -A external/xport 2>/dev/null)" ]; then
+    git clone --recursive https://github.com/SickSartori/xport.git external/xport
+  fi
+fi
 
 echo "== Repo Structure =="
 ls -la
