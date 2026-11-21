@@ -4,6 +4,7 @@ set -euo pipefail
 WORKSPACE_DIR="${GITHUB_WORKSPACE:-$(pwd)}"
 SYSROOT_LIB="${SYSROOT_LIB:-${WORKSPACE_DIR}/sysroot}"
 SDL2_INSTALL="${SDL2_INSTALL:-${WORKSPACE_DIR}/sdl2-install}"
+SHIM_DIR="${WORKSPACE_DIR}/build/rk3326-shims"
 JOBS="${JOBS:-4}"
 MAX_GLIBC="${MAX_GLIBC:-2.30}"
 MC3_PATCH_STRICT="${MC3_PATCH_STRICT:-0}"
@@ -125,6 +126,124 @@ else
   mkdir -p "${SYSROOT_LIB}/lib" "${SYSROOT_LIB}/include"
 fi
 
+echo "== Prepare POSIX/Win32 Compat Shim for RK3326 =="
+mkdir -p "${SHIM_DIR}"
+cat > "${SHIM_DIR}/rk3326_posix_win32_compat.h" <<'EOF'
+#pragma once
+#ifndef _WIN32
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#ifndef MAX_PATH
+#define MAX_PATH 4096
+#endif
+
+using DWORD = uint32_t;
+using WORD = uint16_t;
+using BYTE = uint8_t;
+using BOOL = int;
+using HANDLE = void*;
+using LPCSTR = const char*;
+using LPSTR = char*;
+using LPVOID = void*;
+using LPCVOID = const void*;
+using ULONGLONG = uint64_t;
+using LONGLONG = int64_t;
+
+#ifndef TRUE
+#define TRUE 1
+#endif
+#ifndef FALSE
+#define FALSE 0
+#endif
+#ifndef INVALID_HANDLE_VALUE
+#define INVALID_HANDLE_VALUE ((HANDLE)(intptr_t)-1)
+#endif
+#ifndef GENERIC_READ
+#define GENERIC_READ 0x80000000u
+#endif
+#ifndef OPEN_EXISTING
+#define OPEN_EXISTING 3
+#endif
+#ifndef FILE_ATTRIBUTE_NORMAL
+#define FILE_ATTRIBUTE_NORMAL 0x80u
+#endif
+#ifndef FILE_BEGIN
+#define FILE_BEGIN SEEK_SET
+#endif
+#ifndef FILE_CURRENT
+#define FILE_CURRENT SEEK_CUR
+#endif
+#ifndef FILE_END
+#define FILE_END SEEK_END
+#endif
+
+struct RK3326FileHandle {
+  int fd = -1;
+};
+
+inline HANDLE CreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD, void*,
+                          DWORD, DWORD, HANDLE) {
+  int flags = (dwDesiredAccess & GENERIC_READ) ? O_RDONLY : O_RDWR;
+  int fd = ::open(lpFileName, flags);
+  if (fd < 0) return INVALID_HANDLE_VALUE;
+  auto* h = new RK3326FileHandle{fd};
+  return static_cast<HANDLE>(h);
+}
+
+inline BOOL ReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
+                     DWORD* lpNumberOfBytesRead, void*) {
+  auto* h = static_cast<RK3326FileHandle*>(hFile);
+  if (!h || h->fd < 0) return FALSE;
+  ssize_t n = ::read(h->fd, lpBuffer, nNumberOfBytesToRead);
+  if (n < 0) return FALSE;
+  if (lpNumberOfBytesRead) *lpNumberOfBytesRead = static_cast<DWORD>(n);
+  return TRUE;
+}
+
+inline BOOL CloseHandle(HANDLE hObject) {
+  auto* h = static_cast<RK3326FileHandle*>(hObject);
+  if (!h) return FALSE;
+  if (h->fd >= 0) ::close(h->fd);
+  delete h;
+  return TRUE;
+}
+
+inline DWORD GetFileSize(HANDLE hFile, DWORD* lpFileSizeHigh) {
+  auto* h = static_cast<RK3326FileHandle*>(hFile);
+  if (!h || h->fd < 0) return 0xFFFFFFFFu;
+  struct stat st {};
+  if (::fstat(h->fd, &st) != 0) return 0xFFFFFFFFu;
+  uint64_t sz = static_cast<uint64_t>(st.st_size);
+  if (lpFileSizeHigh) *lpFileSizeHigh = static_cast<DWORD>(sz >> 32);
+  return static_cast<DWORD>(sz & 0xFFFFFFFFu);
+}
+
+inline DWORD SetFilePointer(HANDLE hFile, int64_t lDistanceToMove,
+                            int64_t* lpDistanceToMoveHigh, DWORD dwMoveMethod) {
+  auto* h = static_cast<RK3326FileHandle*>(hFile);
+  if (!h || h->fd < 0) return 0xFFFFFFFFu;
+  off_t offset = static_cast<off_t>(lDistanceToMove);
+  if (lpDistanceToMoveHigh) {
+    offset = static_cast<off_t>((static_cast<uint64_t>(*lpDistanceToMoveHigh) << 32) |
+                                (static_cast<uint64_t>(lDistanceToMove) & 0xFFFFFFFFu));
+  }
+  off_t res = ::lseek(h->fd, offset, static_cast<int>(dwMoveMethod));
+  if (res < 0) return 0xFFFFFFFFu;
+  uint64_t ures = static_cast<uint64_t>(res);
+  if (lpDistanceToMoveHigh) *lpDistanceToMoveHigh = static_cast<int64_t>(ures >> 32);
+  return static_cast<DWORD>(ures & 0xFFFFFFFFu);
+}
+#endif
+EOF
+
 echo "== Generate RK3326 Toolchain =="
 mkdir -p "${WORKSPACE_DIR}/cmake"
 if [ ! -f "${WORKSPACE_DIR}/cmake/aarch64-arkos.cmake" ]; then
@@ -225,6 +344,18 @@ if marker not in txt:
 ' | tee -a patch.log
 fi
 
+if [ -f src/pc/game_disc.cpp ]; then
+  python3 -c '
+from pathlib import Path
+p = Path("src/pc/game_disc.cpp")
+txt = p.read_text(encoding="utf-8")
+guard = "#ifndef _WIN32\n#include \"rk3326_posix_win32_compat.h\"\n#else\n#include <windows.h>\n#endif"
+if "rk3326_posix_win32_compat.h" not in txt and "#include <windows.h>" in txt:
+    p.write_text(txt.replace("#include <windows.h>", guard, 1), encoding="utf-8")
+    print("src/pc/game_disc.cpp: windows.h durch RK3326 POSIX-Shim abgesichert.")
+' | tee -a patch.log
+fi
+
 TOTAL=$(grep -cE 'PATCH-FEHLER:|PATCH-WARNUNG:' patch.log || true)
 echo "Patch-Probleme gesamt: $TOTAL"
 if [ "$TOTAL" -gt 0 ] && [ "${MC3_PATCH_STRICT}" = "1" ]; then
@@ -245,12 +376,9 @@ done
 echo "== Configure & Build for RK3326 (1 GB RAM / Mali-G31) =="
 cmake -S . -B build -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="${WORKSPACE_DIR}/cmake/aarch64-arkos.cmake" \
-  -DSDL2_INSTALL_DIR="${SDL2_INSTALL}" \
-  -DSDL2_DIR="${SDL2_INSTALL}/lib/cmake/SDL2" \
-  -DCMAKE_PREFIX_PATH="${SDL2_INSTALL};${SYSROOT_LIB}" \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_C_FLAGS="-mcpu=cortex-a35 -mtune=cortex-a35 -O2 -pipe" \
-  -DCMAKE_CXX_FLAGS="-mcpu=cortex-a35 -mtune=cortex-a35 -O2 -pipe"
+  -DCMAKE_C_FLAGS="-mcpu=cortex-a35 -mtune=cortex-a35 -O2 -pipe -I${SHIM_DIR}" \
+  -DCMAKE_CXX_FLAGS="-mcpu=cortex-a35 -mtune=cortex-a35 -O2 -pipe -I${SHIM_DIR}"
 
 cmake --build build -j "${JOBS}"
 
